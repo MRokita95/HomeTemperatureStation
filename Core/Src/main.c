@@ -19,10 +19,13 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "lwip.h"
 
-#include "MCP9808.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "lwip/apps/httpd.h"
+#include "MCP9808.h"
+#include "tcp_server.h"
 
 /* USER CODE END Includes */
 
@@ -43,9 +46,6 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-const TickType_t tempTask_frequency = 1000;
-TaskHandle_t tempTask_handle;
-
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
@@ -54,6 +54,14 @@ const osThreadAttr_t defaultTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
+const TickType_t tempTask_frequency = 1000;
+TaskHandle_t tempTask_handle;
+
+
+const TickType_t tcpTask_frequency = 1000;
+TaskHandle_t tcpTask_handle;
+
+extern struct netif gnetif;
 
 /* USER CODE END PV */
 
@@ -65,6 +73,7 @@ void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 void vTask_Temp_Update(void const * argument);
+void vTask_TCP(void const * argument);
 
 /* USER CODE END PFP */
 
@@ -129,6 +138,8 @@ int main(void)
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
   BaseType_t taskSts = xTaskCreate(vTask_Temp_Update,
     "TEMP TASK",
     configMINIMAL_STACK_SIZE,
@@ -138,11 +149,17 @@ int main(void)
 
   assert_param(pdPASS == taskSts);
 
+  taskSts = xTaskCreate(vTask_TCP,
+    "TCP TASK",
+    20*configMINIMAL_STACK_SIZE,
+    ( void * ) NULL,
+    osPriorityNormal,
+    tcpTask_handle );
+
+  assert_param(pdPASS == taskSts);
+
   /* Init temp sensor */
   HAL_StatusTypeDef status = MPC_init(DEFAULT_IIC_ADDR, &hi2c1);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -152,8 +169,6 @@ int main(void)
 
   /* Start scheduler */
   osKernelStart();
-
-  
 
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
@@ -179,15 +194,26 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 180;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -195,12 +221,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -261,8 +287,10 @@ static void MX_GPIO_Init(void)
 {
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
 
 }
 
@@ -290,6 +318,31 @@ void vTask_Temp_Update(void const * argument){
 }
 
 
+void vTask_TCP(void const * argument){
+
+  TickType_t xNextWakeTime;
+
+	const TickType_t xBlockTime = tcpTask_frequency/portTICK_RATE_MS;
+	xNextWakeTime = xTaskGetTickCount();
+
+	/* init code for LWIP */
+	  MX_LWIP_Init();
+
+  uint32_t count = 0;
+  tcp_server_init();
+
+  for(;;){
+
+    vTaskDelayUntil( &xNextWakeTime, xBlockTime );
+
+    ethernetif_input(&gnetif);
+    sys_check_timeouts();
+
+    //MX_LWIP_Process();
+
+  }
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -301,6 +354,7 @@ void vTask_Temp_Update(void const * argument){
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
+
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
