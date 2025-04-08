@@ -26,6 +26,7 @@
 #include "lwip/apps/httpd.h"
 #include "MCP9808.h"
 #include "tcp_server.h"
+#include "temp_server.h"
 
 /* USER CODE END Includes */
 
@@ -149,17 +150,6 @@ int main(void)
 
   assert_param(pdPASS == taskSts);
 
-  taskSts = xTaskCreate(vTask_TCP,
-    "TCP TASK",
-    20*configMINIMAL_STACK_SIZE,
-    ( void * ) NULL,
-    osPriorityNormal,
-    tcpTask_handle );
-
-  assert_param(pdPASS == taskSts);
-
-  /* Init temp sensor */
-  HAL_StatusTypeDef status = MPC_init(DEFAULT_IIC_ADDR, &hi2c1);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -300,6 +290,12 @@ void vTask_Temp_Update(void const * argument){
 
   TickType_t xNextWakeTime;
 
+  /* Init temp sensor */
+  HAL_StatusTypeDef status = MPC_init(DEFAULT_IIC_ADDR, &hi2c1);
+  if (status != HAL_OK){
+    return;
+  }
+
 	const TickType_t xBlockTime = tempTask_frequency/portTICK_RATE_MS;
 	xNextWakeTime = xTaskGetTickCount();
 
@@ -318,31 +314,6 @@ void vTask_Temp_Update(void const * argument){
 }
 
 
-void vTask_TCP(void const * argument){
-
-  TickType_t xNextWakeTime;
-
-	const TickType_t xBlockTime = tcpTask_frequency/portTICK_RATE_MS;
-	xNextWakeTime = xTaskGetTickCount();
-
-	/* init code for LWIP */
-	  MX_LWIP_Init();
-
-  uint32_t count = 0;
-  tcp_server_init();
-
-  for(;;){
-
-    vTaskDelayUntil( &xNextWakeTime, xBlockTime );
-
-    ethernetif_input(&gnetif);
-    sys_check_timeouts();
-
-    //MX_LWIP_Process();
-
-  }
-}
-
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -354,8 +325,11 @@ void vTask_TCP(void const * argument){
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-
+  /* init code for LWIP */
+  MX_LWIP_Init();
   /* USER CODE BEGIN 5 */
+
+  tcp_server_init(7, temp_message_handle);
   /* Infinite loop */
   for(;;)
   {
